@@ -42,6 +42,8 @@ const messages = defineMessages('settings.settings.SettingsOidc', {
   oidcNewUserLogin: 'Allow New Users',
   oidcNewUserLoginTip:
     'Create accounts for new users logging in with this provider',
+  oidcAccountLinking: 'Account Linking',
+  oidcAccountLinkingTip: 'Automatically link accounts based on email.',
   saveSuccess: 'OpenID Connect provider saved successfully!',
   saveError: 'Failed to save OpenID Connect provider configuration',
 });
@@ -90,6 +92,7 @@ export default function EditOidcModal(props: EditOidcModalProps) {
     requiredClaims: Yup.string(),
     scopes: Yup.string(),
     newUserLogin: Yup.boolean(),
+    accountLinking: Yup.boolean(),
   });
 
   const onSubmit = async ({ slug, ...provider }: OidcProvider) => {
@@ -123,6 +126,7 @@ export default function EditOidcModal(props: EditOidcModalProps) {
           requiredClaims: props.provider?.requiredClaims,
           scopes: props.provider?.scopes,
           newUserLogin: props.provider?.newUserLogin,
+          accountLinking: props.provider?.accountLinking,
         }}
         validationSchema={oidcSettingsSchema}
         onSubmit={onSubmit}
@@ -351,6 +355,29 @@ export default function EditOidcModal(props: EditOidcModalProps) {
                           touched.newUserLogin &&
                           typeof errors.newUserLogin === 'string' && (
                             <div className="error">{errors.newUserLogin}</div>
+                          )}
+                      </div>
+                    </div>
+                    <div className="form-row">
+                      <label
+                        htmlFor="oidcAccountLinking"
+                        className="text-label"
+                      >
+                        {intl.formatMessage(messages.oidcAccountLinking)}
+                        <span className="label-tip">
+                          {intl.formatMessage(messages.oidcAccountLinkingTip)}
+                        </span>
+                      </label>
+                      <div className="form-input-area">
+                        <Field
+                          id="oidcAccountLinking"
+                          name="accountLinking"
+                          type="checkbox"
+                        />
+                        {errors.accountLinking &&
+                          touched.accountLinking &&
+                          typeof errors.accountLinking === 'string' && (
+                            <div className="error">{errors.accountLinking}</div>
                           )}
                       </div>
                     </div>

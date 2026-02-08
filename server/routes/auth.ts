@@ -937,7 +937,237 @@ authRoutes.get('/oidc/callback/:slug', async (req, res, next) => {
         .json({ status: 'ok', to: '/profile/settings/linked-accounts' });
     }
 
-    // Create user if one doesn't already exist
+    // Try to link to existing account
+    if (!user && provider.accountLinking) {
+      if (!user && fullUserInfo.email != null) {
+        // Step 1: Try to find existing user by email
+        const existingUser = await userRepository.findOne({
+          where: { email: fullUserInfo.email },
+        });
+
+        if (existingUser) {
+          // Auto-link OIDC account to existing user found by email
+          logger.info(
+            'Found existing user by email during OIDC login; auto-linking OIDC account',
+            {
+              ip: req.ip,
+              email: fullUserInfo.email,
+              userId: existingUser.id,
+              provider: provider.slug,
+            }
+          );
+
+          const newLinkedAccount = new LinkedAccount({
+            user: existingUser,
+            provider: provider.slug,
+            sub: fullUserInfo.sub,
+            username: fullUserInfo.preferred_username ?? fullUserInfo.email,
+          });
+          await linkedAccountsRepository.save(newLinkedAccount);
+          user = existingUser;
+        }
+      }
+
+      // Step 2: Try to find user by username on media server (Jellyfin/Emby/Plex)
+      if (!user && fullUserInfo.preferred_username) {
+        const oidcUsername = fullUserInfo.preferred_username;
+
+        if (
+          settings.main.mediaServerType === MediaServerType.JELLYFIN ||
+          settings.main.mediaServerType === MediaServerType.EMBY
+        ) {
+          // Try matching by Jellyfin/Emby username
+          const jellyfinUser = await userRepository.findOne({
+            where: { jellyfinUsername: oidcUsername },
+          });
+
+          if (jellyfinUser) {
+            logger.info(
+              'Found existing Jellyfin/Emby user by username during OIDC login; auto-linking OIDC account',
+              {
+                ip: req.ip,
+                oidcUsername,
+                userId: jellyfinUser.id,
+                provider: provider.slug,
+              }
+            );
+
+            const newLinkedAccount = new LinkedAccount({
+              user: jellyfinUser,
+              provider: provider.slug,
+              sub: fullUserInfo.sub,
+              username: fullUserInfo.preferred_username ?? oidcUsername,
+            });
+            await linkedAccountsRepository.save(newLinkedAccount);
+            user = jellyfinUser;
+          } else {
+            // User not imported yet — try to find them on the Jellyfin/Emby server and import
+            try {
+              const hostname = getHostname();
+              const admin = await userRepository.findOneOrFail({
+                where: { id: 1 },
+                select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
+                order: { id: 'ASC' },
+              });
+
+              const jellyfinClient = new JellyfinAPI(
+                hostname,
+                settings.jellyfin.apiKey,
+                admin.jellyfinDeviceId ?? ''
+              );
+              jellyfinClient.setUserId(admin.jellyfinUserId ?? '');
+
+              const jellyfinUsers = await jellyfinClient.getUsers();
+              const matchedJellyfinUser = jellyfinUsers.users.find(
+                (u) => u.Name?.toLowerCase() === oidcUsername.toLowerCase()
+              );
+
+              if (matchedJellyfinUser) {
+                logger.info(
+                  'Found matching Jellyfin/Emby user on server during OIDC login; importing and linking',
+                  {
+                    ip: req.ip,
+                    oidcUsername,
+                    jellyfinUserId: matchedJellyfinUser.Id,
+                    provider: provider.slug,
+                  }
+                );
+
+                const deviceId = Buffer.from(
+                  `BOT_jellyseerr_${oidcUsername}`
+                ).toString('base64');
+                const newUser = new User({
+                  jellyfinUsername: matchedJellyfinUser.Name,
+                  jellyfinUserId: matchedJellyfinUser.Id,
+                  jellyfinDeviceId: deviceId,
+                  email: fullUserInfo.email ?? matchedJellyfinUser.Name,
+                  permissions: settings.main.defaultPermissions,
+                  userType:
+                    settings.main.mediaServerType === MediaServerType.JELLYFIN
+                      ? UserType.JELLYFIN
+                      : UserType.EMBY,
+                });
+                newUser.avatar = `/avatarproxy/${matchedJellyfinUser.Id}`;
+                await userRepository.save(newUser);
+
+                const newLinkedAccount = new LinkedAccount({
+                  user: newUser,
+                  provider: provider.slug,
+                  sub: fullUserInfo.sub,
+                  username:
+                    fullUserInfo.preferred_username ??
+                    fullUserInfo.email ??
+                    oidcUsername,
+                });
+                await linkedAccountsRepository.save(newLinkedAccount);
+                user = newUser;
+              }
+            } catch (e) {
+              logger.error(
+                'Failed to search Jellyfin/Emby for OIDC username match',
+                {
+                  ip: req.ip,
+                  oidcUsername,
+                  errorMessage: e.message,
+                }
+              );
+            }
+          }
+        } else if (settings.main.mediaServerType === MediaServerType.PLEX) {
+          // Try matching by Plex username
+          const plexUser = await userRepository.findOne({
+            where: { plexUsername: oidcUsername },
+          });
+
+          if (plexUser) {
+            logger.info(
+              'Found existing Plex user by username during OIDC login; auto-linking OIDC account',
+              {
+                ip: req.ip,
+                oidcUsername,
+                userId: plexUser.id,
+                provider: provider.slug,
+              }
+            );
+
+            const newLinkedAccount = new LinkedAccount({
+              user: plexUser,
+              provider: provider.slug,
+              sub: fullUserInfo.sub,
+              username: fullUserInfo.preferred_username ?? oidcUsername,
+            });
+            await linkedAccountsRepository.save(newLinkedAccount);
+            user = plexUser;
+          } else {
+            // User not imported yet — try to find them on Plex and import
+            try {
+              const mainUser = await userRepository.findOneOrFail({
+                select: { id: true, plexToken: true, plexId: true },
+                where: { id: 1 },
+              });
+              const mainPlexTv = new PlexTvAPI(mainUser.plexToken ?? '');
+              const plexUsersResponse = await mainPlexTv.getUsers();
+              const matchedPlexAccount =
+                plexUsersResponse.MediaContainer.User.find(
+                  (u) =>
+                    u.$.username?.toLowerCase() === oidcUsername.toLowerCase()
+                )?.$;
+
+              if (
+                matchedPlexAccount &&
+                (await mainPlexTv.checkUserAccess(
+                  parseInt(matchedPlexAccount.id)
+                ))
+              ) {
+                logger.info(
+                  'Found matching Plex user on server during OIDC login; importing and linking',
+                  {
+                    ip: req.ip,
+                    oidcUsername,
+                    plexId: matchedPlexAccount.id,
+                    provider: provider.slug,
+                  }
+                );
+
+                const newUser = new User({
+                  email:
+                    matchedPlexAccount.email ||
+                    fullUserInfo.email ||
+                    oidcUsername,
+                  plexUsername: matchedPlexAccount.username,
+                  plexId: parseInt(matchedPlexAccount.id),
+                  plexToken: '',
+                  permissions: settings.main.defaultPermissions,
+                  avatar: matchedPlexAccount.thumb,
+                  userType: UserType.PLEX,
+                });
+                await userRepository.save(newUser);
+
+                const newLinkedAccount = new LinkedAccount({
+                  user: newUser,
+                  provider: provider.slug,
+                  sub: fullUserInfo.sub,
+                  username:
+                    fullUserInfo.preferred_username ??
+                    fullUserInfo.email ??
+                    oidcUsername,
+                });
+                await linkedAccountsRepository.save(newLinkedAccount);
+                user = newUser;
+              }
+            } catch (e) {
+              logger.error('Failed to search Plex for OIDC username match', {
+                ip: req.ip,
+                oidcUsername,
+                errorMessage: e.message,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Create user fallback
     if (!user && fullUserInfo.email != null && provider.newUserLogin) {
       // Check if a user with this email already exists
       const existingUser = await userRepository.findOne({
@@ -952,7 +1182,7 @@ authRoutes.get('/oidc/callback/:slug', async (req, res, next) => {
         });
       }
 
-      logger.info(`Creating user for ${fullUserInfo.email}`, {
+      logger.info(`Creating new user for ${fullUserInfo.email}`, {
         ip: req.ip,
         email: fullUserInfo.email,
       });
@@ -970,15 +1200,15 @@ authRoutes.get('/oidc/callback/:slug', async (req, res, next) => {
       });
       await userRepository.save(user);
 
-      const linkedAccount = new LinkedAccount({
+      const newLinkedAccount = new LinkedAccount({
         user,
         provider: provider.slug,
         sub: fullUserInfo.sub,
         username: fullUserInfo.preferred_username ?? fullUserInfo.email,
       });
-      await linkedAccountsRepository.save(linkedAccount);
+      await linkedAccountsRepository.save(newLinkedAccount);
 
-      user.linkedAccounts = [linkedAccount];
+      user.linkedAccounts = [newLinkedAccount];
       await userRepository.save(user);
     }
 

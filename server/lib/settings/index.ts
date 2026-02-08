@@ -60,6 +60,7 @@ export type OidcProvider = {
   requiredClaims?: string;
   scopes?: string;
   newUserLogin?: boolean;
+  accountLinking?: boolean;
 };
 
 export type PublicOidcProvider = Pick<OidcProvider, 'slug' | 'name' | 'logo'>;
